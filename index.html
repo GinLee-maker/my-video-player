@@ -35,11 +35,11 @@
         
         // 如果没有在网址中提供视频链接，就在这里填写你的123直链
         if (!videoUrl) {
-            videoUrl = '这里粘贴你的123云盘直链';
+            videoUrl = 'https://1830401532.v.123pan.cn/1830401532/%E9%98%BF%E9%87%8C%E4%BA%91/movie/160.%E7%96%AF%E7%8B%82%E5%8A%A8%E7%89%A9%E5%9F%8E.Zootopia.2016.Repack.BluRay.1080p.x265.10bit.4Audio.MNHD-FRDS/%E7%96%AF%E7%8B%82%E5%8A%A8%E7%89%A9%E5%9F%8E.%E5%86%85%E5%B0%81%E7%AE%80%E8%8B%B1%E7%89%B9%E6%95%88SUP+%E7%AE%80%E8%8B%B1%E7%89%B9%E6%95%88ASS+%E7%AE%80%E4%B8%ADSRT%E5%AD%97%E5%B9%95.Zootopia.2016.2160p.BluRay.x265.10bit.SDR.TrueHD.7.1.Atmos-SWTYBLZ.mkv';
         }
         
         // 设置视频源
-        if (videoUrl && videoUrl !== '这里粘贴你的123云盘直链') {
+        if (videoUrl && videoUrl !== 'https://1830401532.v.123pan.cn/1830401532/%E9%98%BF%E9%87%8C%E4%BA%91/movie/160.%E7%96%AF%E7%8B%82%E5%8A%A8%E7%89%A9%E5%9F%8E.Zootopia.2016.Repack.BluRay.1080p.x265.10bit.4Audio.MNHD-FRDS/%E7%96%AF%E7%8B%82%E5%8A%A8%E7%89%A9%E5%9F%8E.%E5%86%85%E5%B0%81%E7%AE%80%E8%8B%B1%E7%89%B9%E6%95%88SUP+%E7%AE%80%E8%8B%B1%E7%89%B9%E6%95%88ASS+%E7%AE%80%E4%B8%ADSRT%E5%AD%97%E5%B9%95.Zootopia.2016.2160p.BluRay.x265.10bit.SDR.TrueHD.7.1.Atmos-SWTYBLZ.mkv') {
             document.getElementById('myVideo').src = videoUrl;
             document.querySelector('.info').style.display = 'none';
         } else {
