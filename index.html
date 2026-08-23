@@ -15,13 +15,14 @@
     .tips { font-size: 13px; color: #bac2ff; margin-top: 8px; }
     #player { width: 100%; max-height: 70vh; background: black; }
     .room { margin-top: 12px; font-size: 13px; color: #aab0ff; }
+    .room a { color: #d6d9ff; word-break: break-all; }
     .err { color: #ff9aa2; }
     .controls { margin: 8px 0; display: flex; gap: 8px; align-items: center; }
     .field { display: flex; gap: 8px; align-items: center; }
     .nowrap { white-space: nowrap; }
   </style>
-  <!-- 一起看同步引擎（轻量） -->
-  <script src="https://togetherjs.com/togetherjs-min.js"></script>
+  <!-- WebRTC 房间与数据通道 -->
+  <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.5/dist/peerjs.min.js"></script>
   <!-- HLS 播放库（用于 m3u8） -->
   <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 </head>
@@ -47,6 +48,7 @@
         <li>支持 mp4/webm 直链；m3u8 会用 HLS 自动播放。</li>
         <li>如果加载失败，多半是跨域或防盗链限制（见下方“直链要点”）。</li>
         <li>在同一房间里，播放/暂停、进度、倍速会自动同步。</li>
+        <li>首次加入时若浏览器阻止自动播放，请手动点一次播放器。</li>
       </ul>
     </div>
 
@@ -62,7 +64,7 @@
   </main>
 
   <footer>
-    <div style="opacity: 0.8;">房间自带聊天（右下角按钮）。不同步时点“手动同步进度”。</div>
+    <div style="opacity: 0.8;">房间使用点对点连接；房主需要保持页面打开。不同步时点“手动同步进度”。</div>
   </footer>
 
 <script>
@@ -75,20 +77,59 @@
   const roomInfoEl = document.getElementById('roomInfo');
   const errorEl = document.getElementById('error');
   const syncNowBtn = document.getElementById('syncNowBtn');
+  let applyingRemoteState = false;
+  let remoteStateTimer = null;
+  let hls = null;
+  let peer = null;
+  let roomRole = '';
+  let roomConnected = false;
+  let participantCount = 0;
+  const connections = new Map();
 
   function getQuery() {
     const p = new URLSearchParams(location.search);
-    return { src: p.get('src') || '', room: p.get('room') || '' };
+    return { src: p.get('src') || '', room: p.get('room') || '', host: p.get('host') || '' };
   }
   function setQuery(q) {
     const p = new URLSearchParams(location.search);
-    if (q.src !== undefined) p.set('src', q.src);
-    if (q.room !== undefined) p.set('room', q.room);
-    history.replaceState(null, '', location.pathname + '?' + p.toString());
+    Object.entries(q).forEach(([key, value]) => {
+      if (value === null || value === '') p.delete(key);
+      else if (value !== undefined) p.set(key, value);
+    });
+    const query = p.toString();
+    history.replaceState(null, '', location.pathname + (query ? '?' + query : '') + location.hash);
   }
   function isHLS(u) { return /\.m3u8(\?|$)/i.test(u); }
   function logStatus(msg) { statusEl.textContent = msg || ''; }
   function showErr(msg) { errorEl.textContent = msg || ''; }
+  function playFromRoom() {
+    player.play().catch(err => {
+      if (err && err.name === 'NotAllowedError') logStatus('进度已同步；请点击播放器允许播放');
+    });
+  }
+  function withRemoteState(fn) {
+    applyingRemoteState = true;
+    clearTimeout(remoteStateTimer);
+    try { fn(); } finally {
+      remoteStateTimer = setTimeout(() => { applyingRemoteState = false; }, 800);
+    }
+  }
+  function createRoomId() {
+    const bytes = new Uint8Array(6);
+    crypto.getRandomValues(bytes);
+    return 'room-' + Array.from(bytes, b => b.toString(36).padStart(2, '0')).join('');
+  }
+  function renderRoomInfo(room) {
+    const shareUrl = new URL(location.href);
+    shareUrl.hash = '';
+    shareUrl.searchParams.delete('host');
+    const countText = participantCount ? ' | 在线：' + participantCount + ' 人' : '';
+    roomInfoEl.replaceChildren(document.createTextNode('房间：' + room + countText + ' | 分享链接：'));
+    const link = document.createElement('a');
+    link.href = shareUrl.href;
+    link.textContent = shareUrl.href;
+    roomInfoEl.appendChild(link);
+  }
 
   async function loadVideo(src) {
     showErr(''); logStatus('加载中...');
@@ -96,16 +137,30 @@
       if (!src) throw new Error('请填写直链');
       if (!/^https?:\/\//i.test(src)) throw new Error('直链必须以 http/https 开头');
 
+      urlInput.value = src;
+      setQuery({ src });
+      if (roomRole && !applyingRemoteState) sendRoomMessage({ type: 'media-src', src });
+
+      if (hls) { hls.destroy(); hls = null; }
+      player.removeAttribute('src');
+      player.load();
+
       if (isHLS(src)) {
+        if (typeof Hls === 'undefined') throw new Error('HLS 播放库加载失败，请刷新后重试');
         if (Hls.isSupported()) {
-          const hls = new Hls({ maxBufferLength: 30, maxMaxBufferLength: 60 });
+          hls = new Hls({ maxBufferLength: 30, maxMaxBufferLength: 60 });
           hls.loadSource(src);
           hls.attachMedia(player);
           hls.on(Hls.Events.MANIFEST_PARSED, () => {
             player.play().catch(()=>{});
             logStatus('HLS 清单解析完成');
           });
-          window._hls = hls;
+          hls.on(Hls.Events.ERROR, (_event, data) => {
+            if (data.fatal) {
+              showErr('HLS 加载失败：' + (data.details || data.type || '未知错误'));
+              logStatus('');
+            }
+          });
         } else if (player.canPlayType('application/vnd.apple.mpegurl')) {
           player.src = src;
           await player.play().catch(()=>{});
@@ -118,69 +173,217 @@
         await player.play().catch(()=>{});
         logStatus('视频加载完成');
       }
-      setQuery({ src });
     } catch (e) { showErr(e.message || String(e)); logStatus(''); }
   }
 
+  function sendToConnection(conn, message) {
+    if (conn && conn.open) conn.send(message);
+  }
+
+  function openConnections() {
+    return Array.from(connections.values()).filter(conn => conn.open);
+  }
+
+  function broadcastRoomMessage(message, exceptPeerId) {
+    openConnections().forEach(conn => {
+      if (conn.peer !== exceptPeerId) conn.send(message);
+    });
+  }
+
+  function sendRoomMessage(message) {
+    if (!roomConnected) return;
+    if (roomRole === 'host') broadcastRoomMessage(message);
+    else sendToConnection(openConnections()[0], message);
+  }
+
+  function fullStateMessage() {
+    const src = getQuery().src;
+    return {
+      type: 'media-state',
+      src: src || '',
+      time: Number.isFinite(player.currentTime) ? player.currentTime : 0,
+      paused: player.paused,
+      rate: player.playbackRate
+    };
+  }
+
+  function updateParticipantCount() {
+    if (roomRole === 'host') participantCount = 1 + openConnections().length;
+    renderRoomInfo(getQuery().room);
+    if (roomRole === 'host') broadcastRoomMessage({ type: 'participant-count', count: participantCount });
+  }
+
+  function applyPlaybackState(msg) {
+    withRemoteState(() => {
+      if (typeof msg.time === 'number' && Number.isFinite(msg.time) && msg.time >= 0 && Math.abs(player.currentTime - msg.time) > 0.6) {
+        try { player.currentTime = msg.time; } catch (_) {}
+      }
+      if (typeof msg.rate === 'number' && msg.rate >= 0.25 && msg.rate <= 4) player.playbackRate = msg.rate;
+      if (msg.paused === false) playFromRoom();
+      if (msg.paused === true) player.pause();
+    });
+  }
+
+  function handleRoomMessage(msg, sourceConn) {
+    if (!msg || typeof msg !== 'object' || typeof msg.type !== 'string') return;
+    if (roomRole === 'host' && sourceConn) broadcastRoomMessage(msg, sourceConn.peer);
+
+    if (msg.type === 'media-src') {
+      const currentSrc = getQuery().src || '';
+      if (typeof msg.src === 'string' && msg.src.length <= 4096 && msg.src !== currentSrc) {
+        withRemoteState(() => { loadVideo(msg.src); });
+      }
+    } else if (msg.type === 'media-play') {
+      withRemoteState(() => { playFromRoom(); });
+    } else if (msg.type === 'media-pause') {
+      withRemoteState(() => { player.pause(); });
+    } else if (msg.type === 'media-seek') {
+      if (typeof msg.time === 'number' && Number.isFinite(msg.time) && msg.time >= 0 && Math.abs(player.currentTime - msg.time) > 0.6) {
+        withRemoteState(() => { try { player.currentTime = msg.time; } catch (_) {} });
+      }
+    } else if (msg.type === 'media-rate') {
+      if (typeof msg.rate === 'number' && msg.rate >= 0.25 && msg.rate <= 4) {
+        withRemoteState(() => { player.playbackRate = msg.rate; });
+      }
+    } else if (msg.type === 'media-state') {
+      if (typeof msg.src === 'string' && msg.src && msg.src.length <= 4096 && msg.src !== (getQuery().src || '')) {
+        player.addEventListener('loadedmetadata', () => applyPlaybackState(msg), { once: true });
+        withRemoteState(() => { loadVideo(msg.src); });
+      } else {
+        applyPlaybackState(msg);
+      }
+    } else if (msg.type === 'participant-count' && roomRole === 'guest') {
+      if (Number.isInteger(msg.count) && msg.count > 0) {
+        participantCount = msg.count;
+        renderRoomInfo(getQuery().room);
+      }
+    }
+  }
+
+  function setupConnection(conn) {
+    connections.set(conn.peer, conn);
+    conn.on('open', function () {
+      roomConnected = true;
+      startRoomBtn.textContent = '已加入房间';
+      logStatus(roomRole === 'host' ? '房间已创建' : '已加入房间');
+      if (roomRole === 'host') {
+        sendToConnection(conn, fullStateMessage());
+        updateParticipantCount();
+      } else {
+        participantCount = Math.max(participantCount, 2);
+        renderRoomInfo(getQuery().room);
+        sendToConnection(conn, { type: 'request-state' });
+      }
+    });
+    conn.on('data', function (msg) {
+      if (msg && msg.type === 'request-state' && roomRole === 'host') sendToConnection(conn, fullStateMessage());
+      else handleRoomMessage(msg, conn);
+    });
+    conn.on('close', function () {
+      connections.delete(conn.peer);
+      if (roomRole === 'host') updateParticipantCount();
+      else {
+        roomConnected = false;
+        participantCount = 1;
+        startRoomBtn.textContent = '重新加入房间';
+        logStatus('与房主的连接已断开');
+      }
+    });
+    conn.on('error', function () {
+      showErr('房间数据连接失败，请检查网络后重试');
+    });
+  }
+
+  function connectToHost(room) {
+    logStatus('正在加入房间...');
+    const conn = peer.connect('my-video-player-' + room, { reliable: true, serialization: 'json' });
+    setupConnection(conn);
+  }
+
   function startRoom() {
+    showErr('');
+    if (typeof window.Peer !== 'function') {
+      showErr('房间组件加载失败，请刷新页面后重试');
+      return;
+    }
+    if (peer) {
+      if (roomRole === 'guest' && !roomConnected) connectToHost(getQuery().room);
+      else {
+        renderRoomInfo(getQuery().room);
+        logStatus(roomConnected ? '已在房间中' : '正在连接房间...');
+      }
+      return;
+    }
+
     const current = getQuery();
     let room = current.room;
-    if (!room) { room = 'room-' + Math.random().toString(36).slice(2, 8); setQuery({ room }); }
+    if (!room) {
+      room = createRoomId();
+      roomRole = 'host';
+      setQuery({ room, host: '1' });
+    } else {
+      roomRole = current.host === '1' ? 'host' : 'guest';
+    }
+    if (!/^[a-zA-Z0-9_-]{1,60}$/.test(room)) {
+      showErr('房间号格式无效');
+      roomRole = '';
+      return;
+    }
 
-    window.TogetherJSConfig = {
-      getUserName: function () { return 'Guest-' + Math.random().toString(36).slice(2, 6); },
-      toolName: 'WatchTogether',
-      suppressJoinConfirmation: true,
-      dontShowClicks: true,
-      on: {
-        ready: function () {
-          roomInfoEl.textContent = '房间：' + room + ' | 链接已可共享（包含 room 参数）';
-          logStatus('已加入房间');
-          const src = getQuery().src;
-          if (src) TogetherJS.send({ type: 'media-src', src });
-        },
-        receive: {
-          'media-src': function (msg) {
-            const currentSrc = getQuery().src || '';
-            if (msg.src && msg.src !== currentSrc) loadVideo(msg.src);
-          },
-          'media-play': function () { player.play().catch(()=>{}); },
-          'media-pause': function () { player.pause(); },
-          'media-seek': function (msg) {
-            if (typeof msg.time === 'number') {
-              const diff = Math.abs(player.currentTime - msg.time);
-              if (diff > 0.6) player.currentTime = msg.time;
-            }
-          },
-          'media-rate': function (msg) {
-            if (typeof msg.rate === 'number') player.playbackRate = msg.rate;
-          }
-        }
+    logStatus(roomRole === 'host' ? '正在创建房间...' : '正在加入房间...');
+    const peerId = roomRole === 'host' ? 'my-video-player-' + room : undefined;
+    peer = new Peer(peerId, { debug: 1 });
+    peer.on('open', function () {
+      if (roomRole === 'host') {
+        roomConnected = true;
+        participantCount = 1;
+        startRoomBtn.textContent = '房间已创建';
+        logStatus('房间已创建');
+        updateParticipantCount();
+      } else {
+        connectToHost(room);
       }
-    };
-    TogetherJS(this);
+    });
+    peer.on('connection', function (conn) {
+      if (roomRole === 'host') setupConnection(conn);
+      else conn.close();
+    });
+    peer.on('error', function (err) {
+      if (err.type === 'unavailable-id') showErr('这个房间已经存在；请使用不含 host=1 的分享链接加入');
+      else if (err.type === 'peer-unavailable') showErr('房间不存在或房主已离线');
+      else showErr('房间连接失败：' + (err.type || err.message || '未知错误'));
+      if (roomRole === 'guest') {
+        roomConnected = false;
+        startRoomBtn.textContent = '重新加入房间';
+      }
+      logStatus('');
+    });
+    peer.on('disconnected', function () {
+      roomConnected = false;
+      logStatus('与房间服务的连接已断开');
+    });
   }
 
   loadBtn.addEventListener('click', () => { const src = urlInput.value.trim(); loadVideo(src); });
   startRoomBtn.addEventListener('click', () => { startRoom(); });
 
-  player.addEventListener('play', () => { if (TogetherJS.running) TogetherJS.send({ type: 'media-play' }); });
-  player.addEventListener('pause', () => { if (TogetherJS.running) TogetherJS.send({ type: 'media-pause' }); });
-  player.addEventListener('ratechange', () => { if (TogetherJS.running) TogetherJS.send({ type: 'media-rate', rate: player.playbackRate }); });
+  player.addEventListener('play', () => { if (roomConnected && !applyingRemoteState) sendRoomMessage({ type: 'media-play' }); });
+  player.addEventListener('pause', () => { if (roomConnected && !applyingRemoteState) sendRoomMessage({ type: 'media-pause' }); });
+  player.addEventListener('ratechange', () => { if (roomConnected && !applyingRemoteState) sendRoomMessage({ type: 'media-rate', rate: player.playbackRate }); });
 
   let lastSent = 0;
   player.addEventListener('timeupdate', () => {
-    if (!TogetherJS.running) return;
+    if (!roomConnected || applyingRemoteState) return;
     const now = performance.now();
     if (now - lastSent > 600) {
-      TogetherJS.send({ type: 'media-seek', time: player.currentTime });
+      sendRoomMessage({ type: 'media-seek', time: player.currentTime });
       lastSent = now;
     }
   });
 
   syncNowBtn.addEventListener('click', () => {
-    if (TogetherJS.running) {
-      TogetherJS.send({ type: 'media-seek', time: player.currentTime });
+    if (roomConnected) {
+      sendRoomMessage({ type: 'media-seek', time: player.currentTime });
       logStatus('已广播当前进度');
     } else {
       logStatus('请先创建或加入房间');
@@ -192,6 +395,10 @@
     if (q.src) { urlInput.value = q.src; loadVideo(q.src); }
     if (q.room) { startRoom(); }
   })();
+
+  window.addEventListener('beforeunload', () => {
+    if (peer && !peer.destroyed) peer.destroy();
+  });
 })();
 </script>
 </body>
